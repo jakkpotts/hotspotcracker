@@ -1,0 +1,4 @@
+username=admin
+last_password=ilovejane
+attempts=264805
+timestamp=2025-03-29 21:40:14
