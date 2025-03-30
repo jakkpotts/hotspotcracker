@@ -55,11 +55,20 @@ def get_login_info():
             if not data or "priKey" not in data or not data["priKey"]:
                 raise ValueError("Invalid or empty priKey received from router")
             
-            parts = data["priKey"].split("x")
-            if len(parts) != 2 or not parts[0]:
-                raise ValueError(f"Invalid priKey format: {data['priKey']}")
-                
-            priKey, timestamp = parts
+            priKey_value = data["priKey"]
+            
+            # Handle the case where priKey starts with 'x' (like "x12ba")
+            if priKey_value.startswith('x'):
+                # Use a default value for priKey and extract timestamp
+                priKey = "0"  # Default value
+                timestamp = priKey_value[1:]  # Remove the 'x' prefix
+            else:
+                # Normal case: priKey is in format "value1xvalue2"
+                parts = priKey_value.split("x")
+                if len(parts) != 2:
+                    raise ValueError(f"Invalid priKey format: {priKey_value}")
+                priKey, timestamp = parts
+            
             return priKey, timestamp, int(time.time())
         except Exception as e:
             print(f"⚠️ Error getting login info: {e} - Attempt {retry+1}/3")
@@ -72,37 +81,78 @@ def get_login_info():
 def base64_encode_custom(message):
     return base64.b64encode(message.encode()).decode()
 
-def password_encode(password, secret, timestamp, timestamp_start):
-    parse16 = int(secret, 16)
-    current_arr = "1234567890abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ~!@#$%^&*()_+{}|[]:;'?,./=-"
+def replace_char_at(s, index, char):
+    """Replace character at index in string s with char"""
+    return s[:index] + char + s[index+1:]
 
+def check_password_type(pwd):
+    """Determine the type of password for charset selection"""
+    if not pwd:
+        return 'mix_all'
+    isnum = pwd.isdigit()
+    islower = pwd.islower()
+    isupper = pwd.isupper()
+    isspec = all(not c.isalnum() for c in pwd)
+    if isnum:
+        return 'number'
+    elif islower:
+        return 'lower'
+    elif isupper:
+        return 'upper'
+    elif isspec:
+        return 'spec'
+    elif any(c.isdigit() for c in pwd) and any(c.islower() for c in pwd) and any(c.isupper() for c in pwd):
+        return 'alpha_num'
+    elif any(c.isalnum() for c in pwd) and any(not c.isalnum() for c in pwd):
+        return 'mix_all'
+    return 'mix_all'
+
+def get_charset(pwd_type):
+    """Get charset based on password type"""
+    # For simplicity, use mix_all
+    return list("1234567890abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ~!@#$%^&*()_+{}:|'[]?,./-=") * 10
+
+def password_encode(password, secret, timestamp, timestamp_start):
+    """Encode password using the same algorithm as the router"""
+    # Determine password type and get appropriate charset
+    pwd_type = check_password_type(password)
+    charset = get_charset(pwd_type)
+
+    # Generate random data for splicing
     num14 = random.randint(1, 4)
     num255 = [random.randint(0, 255) for _ in range(num14)]
-    spliceStr = ''.join([current_arr[i % len(current_arr)] for i in num255])
-    splicPsw = spliceStr + password
+    splice_str = ''.join([charset[i % len(charset)] for i in num255])
+    splic_pwd = splice_str + password
 
+    # Apply transformations
+    parse16 = int(secret, 16)
     for i in range(4):
-        num = ((parse16 >> (i * 8)) & 0xff) % len(splicPsw)
-        chr1 = splicPsw[num]
-        chr2 = splicPsw[i % len(splicPsw)]
-        splicPsw = splicPsw[:num] + chr2 + splicPsw[num+1:]
-        splicPsw = splicPsw[:i % len(splicPsw)] + chr1 + splicPsw[i % len(splicPsw)+1:]
+        idx1 = ((parse16 >> (i * 8)) & 0xff) % len(splic_pwd)
+        idx2 = i % len(splic_pwd)
+        # Swap characters
+        char1 = splic_pwd[idx1]
+        char2 = splic_pwd[idx2]
+        splic_pwd = replace_char_at(splic_pwd, idx1, char2)
+        splic_pwd = replace_char_at(splic_pwd, idx2, char1)
 
-    random1 = ''.join(f"{x:02x}" for x in num255)
-    endTime = int(time.time())
-    time_stamp = hex(int(timestamp, 16) + (endTime - timestamp_start))[2:]
+    # Create message with timestamp
+    random1 = ''.join([f"{x:02x}" for x in num255])
+    time_diff = int(time.time()) - timestamp_start
+    time_stamp = int(timestamp, 16) + time_diff
+    message = f"{random1}x{time_stamp:x}:{splic_pwd}"
+    base64_str = base64_encode_custom(message)
 
-    message = f"{random1}x{time_stamp}:{splicPsw}"
-    base64Str = base64_encode_custom(message)
-
+    # Apply further transformations to base64 string
     for i in range(4):
-        num = ((parse16 >> (i * 8)) & 0xff) % len(base64Str)
-        chr1 = base64Str[num]
-        chr2 = base64Str[i % len(base64Str)]
-        base64Str = base64Str[:num] + chr2 + base64Str[num+1:]
-        base64Str = base64Str[:i % len(base64Str)] + chr1 + base64Str[i % len(base64Str)+1:]
+        idx1 = ((parse16 >> (i * 8)) & 0xff) % len(base64_str)
+        idx2 = i % len(base64_str)
+        # Swap characters
+        char1 = base64_str[idx1]
+        char2 = base64_str[idx2]
+        base64_str = replace_char_at(base64_str, idx1, char2)
+        base64_str = replace_char_at(base64_str, idx2, char1)
 
-    return base64Str
+    return base64_str
 
 def try_login(username, raw_password):
     max_retries = 3
